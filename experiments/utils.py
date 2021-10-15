@@ -14,9 +14,10 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.autograd import Variable
-from torchfile import load as load_lua
+from logs.logger import logger
 
 from net import Vgg16
+
 
 def tensor_load_rgbimage(filename, size=None, scale=None, keep_asp=False):
     img = Image.open(filename).convert('RGB')
@@ -65,7 +66,7 @@ def subtract_imagenet_mean_batch(batch):
     mean[:, 0, :, :] = 103.939
     mean[:, 1, :, :] = 116.779
     mean[:, 2, :, :] = 123.680
-    return batch - Variable(mean)
+    return batch - Variable(mean).cuda(0)
 
 
 def add_imagenet_mean_batch(batch):
@@ -75,12 +76,13 @@ def add_imagenet_mean_batch(batch):
     mean[:, 0, :, :] = 103.939
     mean[:, 1, :, :] = 116.779
     mean[:, 2, :, :] = 123.680
-    return batch + Variable(mean)
+    return batch + Variable(mean).cuda(0)
+
 
 def imagenet_clamp_batch(batch, low, high):
-    batch[:,0,:,:].data.clamp_(low-103.939, high-103.939)
-    batch[:,1,:,:].data.clamp_(low-116.779, high-116.779)
-    batch[:,2,:,:].data.clamp_(low-123.680, high-123.680)
+    batch[:, 0, :, :].data.clamp_(low - 103.939, high - 103.939)
+    batch[:, 1, :, :].data.clamp_(low - 116.779, high - 116.779)
+    batch[:, 2, :, :].data.clamp_(low - 123.680, high - 123.680)
 
 
 def preprocess_batch(batch):
@@ -96,12 +98,16 @@ def init_vgg16(model_folder):
     if not os.path.exists(os.path.join(model_folder, 'vgg16.weight')):
         if not os.path.exists(os.path.join(model_folder, 'vgg16.t7')):
             os.system(
-                'wget http://cs.stanford.edu/people/jcjohns/fast-neural-style/models/vgg16.t7 -O ' + os.path.join(model_folder, 'vgg16.t7'))
-        vgglua = load_lua(os.path.join(model_folder, 'vgg16.t7'))
+                'wget https://download.pytorch.org/models/vgg16-397923af.pth -O '
+                + os.path.join(model_folder, 'vgg16.pth'))
+            logger.info("start downloading vgg16.pth save at " + os.path.join(model_folder, 'vgg16.pth'))
+
+        vgg_pth = torch.load(os.path.join(model_folder, 'vgg16.pth'))
         vgg = Vgg16()
-        for (src, dst) in zip(vgglua.parameters()[0], vgg.parameters()):
-            dst.data[:] = src
+        for (src, dst) in zip(vgg_pth.items(), vgg.parameters()):
+            dst.data[:] = src[1]
         torch.save(vgg.state_dict(), os.path.join(model_folder, 'vgg16.weight'))
+        logger.info("save vgg16 state_dict at " + os.path.join(model_folder, 'vgg16.weight'))
 
 
 class StyleLoader():
@@ -110,11 +116,11 @@ class StyleLoader():
         self.style_size = style_size
         self.files = os.listdir(style_folder)
         self.cuda = cuda
-    
+
     def get(self, i):
-        idx = i%len(self.files)
+        idx = i % len(self.files)
         filepath = os.path.join(self.folder, self.files[idx])
-        style = tensor_load_rgbimage(filepath, self.style_size)    
+        style = tensor_load_rgbimage(filepath, self.style_size)
         style = style.unsqueeze(0)
         style = preprocess_batch(style)
         if self.cuda:

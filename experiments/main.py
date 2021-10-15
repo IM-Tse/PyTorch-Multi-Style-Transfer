@@ -11,6 +11,7 @@
 import os
 import sys
 import time
+from datetime import datetime
 import numpy as np
 from tqdm import tqdm, trange
 
@@ -25,19 +26,26 @@ from torchvision import transforms
 import utils
 from net import Net, Vgg16
 
+from logs.logger import logger, config
 from option import Options
+
+# 忽略计算均值方差的时候 input 和 target 维度不匹配的警告
+# import warnings
+# warnings.filterwarnings('ignore')
+
 
 def main():
     # figure out the experiments type
     args = Options().parse()
     if args.subcommand is None:
-        raise ValueError("ERROR: specify the experiment type")
+        logger.error("ERROR: specify the experiment type")
+        raise
     if args.cuda and not torch.cuda.is_available():
-        raise ValueError("ERROR: cuda is not available, try running on CPU")
-
+        logger.error("ERROR: cuda is not available, try running on CPU")
+        raise
 
     if args.subcommand == "train":
-        # Training the model 
+        # Training the model
         train(args)
 
     elif args.subcommand == 'eval':
@@ -49,7 +57,8 @@ def main():
         optimize(args)
 
     else:
-        raise ValueError('Unknow experiment type')
+        logger.error('Unknow experiment type')
+        raise
 
 
 def optimize(args):
@@ -62,7 +71,7 @@ def optimize(args):
     content_image = Variable(utils.preprocess_batch(content_image), requires_grad=False)
     content_image = utils.subtract_imagenet_mean_batch(content_image)
     style_image = utils.tensor_load_rgbimage(args.style_image, size=args.style_size)
-    style_image = style_image.unsqueeze(0)    
+    style_image = style_image.unsqueeze(0)
     style_image = Variable(utils.preprocess_batch(style_image), requires_grad=False)
     style_image = utils.subtract_imagenet_mean_batch(style_image)
 
@@ -100,7 +109,7 @@ def optimize(args):
         total_loss.backward()
         optimizer.step()
         tbar.set_description(total_loss.data.cpu().numpy()[0])
-    # save the image    
+    # save the image
     output = utils.add_imagenet_mean_batch(output)
     utils.tensor_save_bgrimage(output.data[0], args.output_image, args.cuda)
 
@@ -116,7 +125,7 @@ def train(args):
     else:
         kwargs = {}
 
-    transform = transforms.Compose([transforms.Scale(args.image_size),
+    transform = transforms.Compose([transforms.Resize(args.image_size),
                                     transforms.CenterCrop(args.image_size),
                                     transforms.ToTensor(),
                                     transforms.Lambda(lambda x: x.mul(255))])
@@ -125,9 +134,9 @@ def train(args):
 
     style_model = Net(ngf=args.ngf)
     if args.resume is not None:
-        print('Resuming, initializing using weight from {}.'.format(args.resume))
+        logger.info('Resuming, initializing using weight from {}.'.format(args.resume))
         style_model.load_state_dict(torch.load(args.resume))
-    print(style_model)
+
     optimizer = Adam(style_model.parameters(), args.lr)
     mse_loss = torch.nn.MSELoss()
 
@@ -141,15 +150,19 @@ def train(args):
 
     style_loader = utils.StyleLoader(args.style_folder, args.style_size)
 
-    tbar = trange(args.epochs)
-    for e in tbar:
+    logger.info(" 开始训练模型 ...... ")
+    for e in range(args.epochs):
+        logger.info(logger.info('Epoch [{}/{}]'.format(e + 1, config.epochs)))
         style_model.train()
         agg_content_loss = 0.
         agg_style_loss = 0.
         count = 0
-        for batch_id, (x, _) in enumerate(train_loader):
+        pbar = tqdm(train_loader)
+        for batch_id, (x, _) in enumerate(pbar):
             n_batch = len(x)
             count += n_batch
+            pbar.set_description(f"Epoch {e + 1}/{args.epochs}")
+            pbar.set_postfix({'Iter': '{}/{}'.format(count, len(train_dataset))})
             optimizer.zero_grad()
             x = Variable(utils.preprocess_batch(x))
             if args.cuda:
@@ -185,42 +198,37 @@ def train(args):
             total_loss.backward()
             optimizer.step()
 
-            agg_content_loss += content_loss.data[0]
-            agg_style_loss += style_loss.data[0]
+            agg_content_loss += content_loss.item()
+            agg_style_loss += style_loss.item()
 
             if (batch_id + 1) % args.log_interval == 0:
-                mesg = "{}\tEpoch {}:\t[{}/{}]\tcontent: {:.6f}\tstyle: {:.6f}\ttotal: {:.6f}".format(
-                    time.ctime(), e + 1, count, len(train_dataset),
-                                agg_content_loss / (batch_id + 1),
-                                agg_style_loss / (batch_id + 1),
-                                (agg_content_loss + agg_style_loss) / (batch_id + 1)
-                )
-                tbar.set_description(mesg)
-
-            
+                msg = 'Iter: [{}/{}] | content: {:.4f} | style: {:.4f} | total: {} | {}'
+                logger.info(msg.format(count, len(train_dataset),
+                                       agg_content_loss / (batch_id + 1),
+                                       agg_style_loss / (batch_id + 1),
+                                       (agg_content_loss + agg_style_loss) / (batch_id + 1)
+                                       ))
             if (batch_id + 1) % (4 * args.log_interval) == 0:
                 # save model
                 style_model.eval()
                 style_model.cpu()
-                save_model_filename = "Epoch_" + str(e) + "iters_" + str(count) + "_" + \
-                    str(time.ctime()).replace(' ', '_') + "_" + str(
+                save_model_filename = "Epoch_" + str(e) + "_Iter_" + str(count) + "_" + \
+                                      str(datetime.now()).replace(' ', '_').replace(':', '-') + "_" + str(
                     args.content_weight) + "_" + str(args.style_weight) + ".model"
                 save_model_path = os.path.join(args.save_model_dir, save_model_filename)
                 torch.save(style_model.state_dict(), save_model_path)
                 style_model.train()
                 style_model.cuda()
-                tbar.set_description("\nCheckpoint, trained model saved at", save_model_path)
-
+                logger.info("Checkpoint, trained model saved at " + save_model_path)
     # save model
     style_model.eval()
     style_model.cpu()
-    save_model_filename = "Final_epoch_" + str(args.epochs) + "_" + \
-        str(time.ctime()).replace(' ', '_') + "_" + str(
-        args.content_weight) + "_" + str(args.style_weight) + ".model"
+    save_model_filename = "Final_epoch_" + str(args.epochs) + "_" \
+                          + str(datetime.now()).replace(' ', '_').replace(':', '-') + "_" \
+                          + str(args.content_weight) + "_" + str(args.style_weight) + ".model"
     save_model_path = os.path.join(args.save_model_dir, save_model_filename)
     torch.save(style_model.state_dict(), save_model_path)
-
-    print("\nDone, trained model saved at", save_model_path)
+    logger.info("Done, trained model saved at " + save_model_path)
 
 
 def check_paths(args):
@@ -229,6 +237,8 @@ def check_paths(args):
             os.makedirs(args.vgg_model_dir)
         if not os.path.exists(args.save_model_dir):
             os.makedirs(args.save_model_dir)
+        if not os.path.exists(args.check_model_path):
+            os.makedirs(args.check_model_path)
     except OSError as e:
         print(e)
         sys.exit(1)
@@ -238,7 +248,7 @@ def evaluate(args):
     content_image = utils.tensor_load_rgbimage(args.content_image, size=args.content_size, keep_asp=True)
     content_image = content_image.unsqueeze(0)
     style = utils.tensor_load_rgbimage(args.style_image, size=args.style_size)
-    style = style.unsqueeze(0)    
+    style = style.unsqueeze(0)
     style = utils.preprocess_batch(style)
 
     style_model = Net(ngf=args.ngf)
@@ -260,20 +270,20 @@ def evaluate(args):
     style_model.setTarget(style_v)
 
     output = style_model(content_image)
-    #output = utils.color_match(output, style_v)
+    # output = utils.color_match(output, style_v)
     utils.tensor_save_bgrimage(output.data[0], args.output_image, args.cuda)
 
 
-def fast_evaluate(args, basedir, contents, idx = 0):
+def fast_evaluate(args, basedir, contents, idx=0):
     # basedir to save the data
     style_model = Net(ngf=args.ngf)
     style_model.load_state_dict(torch.load(args.model), False)
     style_model.eval()
     if args.cuda:
         style_model.cuda()
-    
-    style_loader = StyleLoader(args.style_folder, args.style_size, 
-        cuda=args.cuda)
+
+    style_loader = utils.StyleLoader(args.style_folder, args.style_size,
+                                     cuda=args.cuda)
 
     for content_image in contents:
         idx += 1
@@ -286,10 +296,10 @@ def fast_evaluate(args, basedir, contents, idx = 0):
             style_v = Variable(style_loader.get(isx).data)
             style_model.setTarget(style_v)
             output = style_model(content_image)
-            filename = os.path.join(basedir, "{}_{}.png".format(idx, isx+1))
+            filename = os.path.join(basedir, "{}_{}.png".format(idx, isx + 1))
             utils.tensor_save_bgrimage(output.data[0], filename, args.cuda)
             print(filename)
 
 
 if __name__ == "__main__":
-   main()
+    main()
